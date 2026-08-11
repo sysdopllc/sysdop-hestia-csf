@@ -431,7 +431,7 @@ def choose_hestia_custom_key(path: Path, hestia_log: str) -> str:
             return key
     for number in range(1, 10):
         key = f"CUSTOM{number}_LOG"
-        if key in values and not values[key]:
+        if key in values and values[key] in {"", "/var/log/customlog"}:
             return key
     raise SystemExit("no free CUSTOM1_LOG..CUSTOM9_LOG slot for Hestia auth.log")
 

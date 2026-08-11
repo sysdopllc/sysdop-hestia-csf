@@ -57,9 +57,23 @@ def patch_panel(panel: Path, snippet: str) -> None:
     if 'href="/list/csf/"' in text:
         text = repair_nested_csf_link(text)
     if 'href="/list/csf/"' in text:
-        raise SystemExit(
-            "an unmanaged non-nested CSF menu entry exists; refusing to guess its scope"
-        )
+        href = text.find('href="/list/csf/"')
+        legacy_start = text.rfind("<!-- CSF Firewall -->", 0, href)
+        legacy_end = text.find("<!-- Web Terminal -->", href)
+        if legacy_start < 0 or legacy_end < 0:
+            raise SystemExit(
+                "an unmanaged non-nested CSF menu entry exists; refusing to guess its scope"
+            )
+        legacy = text[legacy_start:legacy_end]
+        if (
+            legacy.count('href="/list/csf/"') != 1
+            or '($_SESSION["userContext"] ?? "") === "admin"' not in legacy
+            or 'empty($_SESSION["look"])' not in legacy
+        ):
+            raise SystemExit("pre-existing CSF entry does not meet the certified auth guard")
+        line_start = text.rfind("\n", 0, legacy_start) + 1
+        legacy_end_line = text.rfind("\n", 0, legacy_end) + 1
+        text = text[:line_start] + text[legacy_end_line:]
 
     anchors = ("\t\t\t\t\t\t\t<!-- Web Terminal -->", "<!-- Web Terminal -->", "<!-- Server Settings -->")
     insertion = -1
@@ -88,6 +102,26 @@ def patch_regex(path: Path, fragment: str) -> None:
         replacement = fragment.rstrip("\n") + "\n"
         rendered = pattern.sub(lambda _match: replacement, original)
     else:
+        legacy_marker = "# HestiaCP failed panel authentication:"
+        legacy_start = original.find(legacy_marker)
+        if legacy_start >= 0:
+            legacy_start = original.rfind("\n", 0, legacy_start) + 1
+            return_matches = list(re.finditer(r"(?m)^\s*return 0;\s*$", original))
+            if not return_matches:
+                raise SystemExit("legacy Hestia regex return point not found")
+            legacy_end = return_matches[-1].start()
+            legacy = original[legacy_start:legacy_end]
+            required = (
+                "Failed HestiaCP login from",
+                "failed to login",
+                '"hestia"',
+                "$globlogs{CUSTOM1_LOG}",
+            )
+            if not all(needle in legacy for needle in required):
+                raise SystemExit("unrecognized legacy Hestia regex; refusing to replace it")
+            original = original[:legacy_start] + original[legacy_end:]
+        elif "Failed HestiaCP login from" in original:
+            raise SystemExit("unmanaged Hestia regex exists; refusing to add a duplicate")
         matches = list(re.finditer(r"(?m)^\s*return 0;\s*$", original))
         if not matches:
             raise SystemExit("regex.custom.pm insertion point not found")

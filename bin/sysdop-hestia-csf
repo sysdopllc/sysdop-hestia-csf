@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 umask 077
 
-readonly KIT_VERSION="1.0.0"
+readonly KIT_VERSION="1.0.1"
 readonly UPSTREAM_VERSION="15.10"
 readonly UPSTREAM_URL="https://github.com/Aetherinox/csf-firewall/releases/download/15.10/csf-firewall-v15.10.tgz"
 readonly UPSTREAM_SHA256="788317da71d31a338da4cff3bdae9471137efc3978436692fe9d005eb70f54b3"

@@ -12,6 +12,12 @@ trap cleanup EXIT
 
 cp -a "$TEST_DIR/fixtures/hestia-root" "$TEST_TMP/root"
 cp -a "$TEST_DIR/fixtures/upstream" "$TEST_TMP/upstream"
+cp -a "$TEST_DIR/fixtures/hestia-root" "$TEST_TMP/nested-root"
+cp -a "$TEST_DIR/fixtures/hestia-root" "$TEST_TMP/legacy-root"
+cp "$TEST_DIR/fixtures/panel-nested.php" \
+	"$TEST_TMP/nested-root/usr/local/hestia/web/templates/includes/panel.php"
+cp "$TEST_DIR/fixtures/regex-legacy.pm" \
+	"$TEST_TMP/legacy-root/usr/local/csf/bin/regex.custom.pm"
 
 python3 -m py_compile "$KIT_DIR"/lib/*.py
 bash -n "$KIT_DIR/bin/sysdop-hestia-csf"
@@ -32,6 +38,29 @@ if grep -q 'systemctl disable firewalld' "$TEST_TMP/upstream/install.generic.sh"
 	exit 1
 fi
 grep -q 'SYSDOP_Hestia_safety_patch_v1' "$TEST_TMP/upstream/install.generic.sh"
+
+python3 "$KIT_DIR/lib/hestia_profile.py" configure \
+	--root "$TEST_TMP/nested-root" \
+	--config "$TEST_TMP/nested-root/etc/csf/csf.conf" > "$TEST_TMP/nested-configure.json"
+python3 "$KIT_DIR/lib/patch_hestia_ui.py" \
+	--root "$TEST_TMP/nested-root" \
+	--source "$TEST_TMP/upstream" \
+	--templates "$KIT_DIR/templates" > "$TEST_TMP/nested-ui.txt"
+nested_panel="$TEST_TMP/nested-root/usr/local/hestia/web/templates/includes/panel.php"
+[[ "$(grep -c 'href="/fm/"' "$nested_panel")" == "1" ]]
+[[ "$(grep -c 'href="/list/csf/"' "$nested_panel")" == "1" ]]
+[[ "$(grep -c 'SYSDOP Hestia CSF integration' "$nested_panel")" == "1" ]]
+
+python3 "$KIT_DIR/lib/hestia_profile.py" configure \
+	--root "$TEST_TMP/legacy-root" \
+	--config "$TEST_TMP/legacy-root/etc/csf/csf.conf" > "$TEST_TMP/legacy-configure.json"
+python3 "$KIT_DIR/lib/patch_hestia_ui.py" \
+	--root "$TEST_TMP/legacy-root" \
+	--source "$TEST_TMP/upstream" \
+	--templates "$KIT_DIR/templates" > "$TEST_TMP/legacy-ui.txt"
+legacy_regex="$TEST_TMP/legacy-root/usr/local/csf/bin/regex.custom.pm"
+[[ "$(grep -c 'SYSDOP_HESTIA_REGEX_BEGIN' "$legacy_regex")" == "1" ]]
+[[ "$(grep -c 'Failed HestiaCP login from' "$legacy_regex")" == "1" ]]
 
 python3 "$KIT_DIR/lib/hestia_profile.py" audit --root "$TEST_TMP/root" > "$TEST_TMP/profile.json"
 python3 - "$TEST_TMP/profile.json" <<'PY'
@@ -121,5 +150,14 @@ php -l "$TEST_TMP/root/usr/local/hestia/web/list/csf/index.php"
 php -l "$TEST_TMP/root/usr/local/hestia/web/list/csf/frame.php"
 php -l "$TEST_TMP/root/usr/local/hestia/web/templates/pages/list_csf.php"
 php -l "$panel"
+
+# Adopt the exact pre-kit certified menu entry (same auth guard, old comment).
+perl -0pi -e 's/<!-- SYSDOP Hestia CSF integration -->/<!-- CSF Firewall -->/' "$panel"
+python3 "$KIT_DIR/lib/patch_hestia_ui.py" \
+	--root "$TEST_TMP/root" \
+	--source "$TEST_TMP/upstream" \
+	--templates "$KIT_DIR/templates" > "$TEST_TMP/ui-adopt-legacy.txt"
+[[ "$(grep -c 'SYSDOP Hestia CSF integration' "$panel")" == "1" ]]
+[[ "$(grep -c 'href="/list/csf/"' "$panel")" == "1" ]]
 
 printf 'PASS: local fixture, security guards, integration and idempotency\n'
