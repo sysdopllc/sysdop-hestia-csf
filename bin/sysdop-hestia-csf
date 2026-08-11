@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 077
+
+readonly KIT_VERSION="1.0.0"
+readonly UPSTREAM_VERSION="15.10"
+readonly UPSTREAM_URL="https://github.com/Aetherinox/csf-firewall/releases/download/15.10/csf-firewall-v15.10.tgz"
+readonly UPSTREAM_SHA256="788317da71d31a338da4cff3bdae9471137efc3978436692fe9d005eb70f54b3"
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+KIT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+MODE=""
+ARCHIVE=""
+BACKUP_ROOT="/home/sysdopagent/hestia-fixes"
+PRESERVE_CSFPOST=0
+WORK_DIR=""
+BACKUP_DIR=""
+
+usage() {
+	cat <<'USAGE'
+Uso:
+  sysdop-hestia-csf --audit
+  sysdop-hestia-csf --apply [--archive ARCHIVO] [--backup-root RUTA]
+                     [--preserve-csfpost]
+
+--audit             Detecta el perfil Hestia/CSF sin escribir.
+--apply             Instala, adapta, valida y deja CSF/LFD desactivados.
+--archive ARCHIVO   Usa el asset 15.10 local; exige el SHA-256 fijado.
+--backup-root RUTA  Destino de respaldos (predeterminado: /home/sysdopagent/hestia-fixes).
+--preserve-csfpost  Conserva csfpost.sh tras respaldarlo; por defecto instala un hook seguro vacío.
+
+Este kit deliberadamente no ofrece una opción para activar CSF.
+USAGE
+}
+
+die() {
+	printf 'ERROR: %s\n' "$*" >&2
+	exit 1
+}
+
+log() {
+	printf '[sysdop-hestia-csf] %s\n' "$*"
+}
+
+need() {
+	command -v "$1" >/dev/null 2>&1 || die "Falta el comando requerido: $1"
+}
+
+while (($#)); do
+	case "$1" in
+		--audit|--apply)
+			[[ -z "$MODE" ]] || die "Elija solamente --audit o --apply"
+			MODE="${1#--}"
+			shift
+			;;
+		--archive)
+			(($# >= 2)) || die "--archive requiere una ruta"
+			ARCHIVE="$2"
+			shift 2
+			;;
+		--backup-root)
+			(($# >= 2)) || die "--backup-root requiere una ruta"
+			BACKUP_ROOT="$2"
+			shift 2
+			;;
+		--preserve-csfpost)
+			PRESERVE_CSFPOST=1
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			die "Argumento desconocido: $1"
+			;;
+	esac
+done
+
+[[ -n "$MODE" ]] || { usage >&2; exit 2; }
+[[ -d /usr/local/hestia ]] || die "No se detectó HestiaCP en /usr/local/hestia"
+[[ -f /usr/local/hestia/conf/hestia.conf ]] || die "Falta hestia.conf"
+
+need python3
+
+if [[ "$MODE" == "audit" ]]; then
+	python3 "$KIT_DIR/lib/hestia_profile.py" audit --root /
+	if command -v systemctl >/dev/null 2>&1; then
+		printf 'csf_active=%s\n' "$(systemctl is-active csf 2>/dev/null || true)"
+		printf 'csf_enabled=%s\n' "$(systemctl is-enabled csf 2>/dev/null || true)"
+		printf 'lfd_active=%s\n' "$(systemctl is-active lfd 2>/dev/null || true)"
+		printf 'lfd_enabled=%s\n' "$(systemctl is-enabled lfd 2>/dev/null || true)"
+	fi
+	[[ -e /etc/csf/csf.disable ]] && printf 'csf_disable_marker=present\n' || printf 'csf_disable_marker=absent\n'
+	exit 0
+fi
+
+[[ "$(id -u)" == "0" ]] || die "--apply requiere root"
+[[ "$(cat /proc/1/comm 2>/dev/null || true)" == "systemd" ]] || die "Se admite solamente Hestia con systemd"
+
+for cmd in curl sha256sum tar perl php systemctl install awk sed grep; do
+	need "$cmd"
+done
+
+case "$BACKUP_ROOT" in
+	/|/etc|/usr|/var|/home|/root) die "Destino de respaldo demasiado amplio: $BACKUP_ROOT" ;;
+esac
+[[ "$BACKUP_ROOT" == /* ]] || die "El destino de respaldo debe ser absoluto"
+if [[ "$BACKUP_ROOT" == *"/../"* || "$BACKUP_ROOT" == */.. ]]; then
+	die "El destino de respaldo contiene segmentos no resueltos"
+fi
+
+WORK_DIR="$(mktemp -d /tmp/sysdop-hestia-csf.XXXXXX)"
+cleanup() {
+	if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+		rm -rf -- "$WORK_DIR"
+	fi
+}
+trap cleanup EXIT
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+install -d -m 0700 "$BACKUP_ROOT"
+BACKUP_DIR="$(mktemp -d "$BACKUP_ROOT/csf-hestia-$timestamp.XXXXXX")"
+
+log "Kit $KIT_VERSION; perfil previo"
+python3 "$KIT_DIR/lib/hestia_profile.py" audit --root / | tee "$BACKUP_DIR/profile-before.json"
+
+backup_paths=()
+for path in \
+	/etc/csf \
+	/usr/local/csf \
+	/usr/sbin/csf \
+	/usr/sbin/lfd \
+	/usr/local/hestia/bin/csf.pl \
+	/usr/local/hestia/web/list/csf \
+	/usr/local/hestia/web/templates/pages/list_csf.php \
+	/usr/local/hestia/web/templates/includes/panel.php \
+	/usr/lib/systemd/system/csf.service \
+	/usr/lib/systemd/system/lfd.service \
+	/etc/systemd/system/csf.service \
+	/etc/systemd/system/lfd.service \
+	/etc/cron.d/csf_update \
+	/etc/cron.d/lfd-cron; do
+	[[ -e "$path" || -L "$path" ]] && backup_paths+=("${path#/}")
+done
+
+if ((${#backup_paths[@]})); then
+	tar -C / -czf "$BACKUP_DIR/pre-change.tar.gz" -- "${backup_paths[@]}"
+	sha256sum "$BACKUP_DIR/pre-change.tar.gz" > "$BACKUP_DIR/pre-change.tar.gz.sha256"
+fi
+
+{
+	printf 'hostname=%s\n' "$(hostname -f 2>/dev/null || hostname)"
+	printf 'date=%s\n' "$(date --iso-8601=seconds)"
+	printf 'csf_version=%s\n' "$(/usr/sbin/csf -v 2>/dev/null || echo absent)"
+	for unit in csf lfd firewalld; do
+		printf '%s_active=%s\n' "$unit" "$(systemctl is-active "$unit" 2>/dev/null || true)"
+		printf '%s_enabled=%s\n' "$unit" "$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+	done
+} > "$BACKUP_DIR/service-state-before.txt"
+
+command -v iptables-save >/dev/null 2>&1 && iptables-save > "$BACKUP_DIR/iptables-before.rules" || true
+command -v ip6tables-save >/dev/null 2>&1 && ip6tables-save > "$BACKUP_DIR/ip6tables-before.rules" || true
+command -v nft >/dev/null 2>&1 && nft list ruleset > "$BACKUP_DIR/nft-before.rules" 2>/dev/null || true
+
+firewalld_before="$(systemctl show firewalld -p ActiveState -p UnitFileState 2>/dev/null || true)"
+
+log "Instalando guardia de desactivación antes de tocar CSF"
+systemctl stop csf lfd >/dev/null 2>&1 || true
+systemctl disable csf lfd >/dev/null 2>&1 || true
+systemctl mask --runtime csf lfd >/dev/null 2>&1 || true
+if [[ -x /usr/sbin/csf ]]; then
+	/usr/sbin/csf -x >> "$BACKUP_DIR/disable-before.log" 2>&1 || true
+fi
+
+archive_path="$WORK_DIR/csf-firewall-v${UPSTREAM_VERSION}.tgz"
+if [[ -n "$ARCHIVE" ]]; then
+	[[ -f "$ARCHIVE" ]] || die "No existe el archivo: $ARCHIVE"
+	cp -- "$ARCHIVE" "$archive_path"
+else
+	log "Descargando Aetherinox CSF $UPSTREAM_VERSION"
+	curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+		--output "$archive_path" "$UPSTREAM_URL"
+fi
+
+actual_sha="$(sha256sum "$archive_path" | awk '{print $1}')"
+[[ "$actual_sha" == "$UPSTREAM_SHA256" ]] || die "SHA-256 upstream inválido: $actual_sha"
+printf '%s  %s\n' "$actual_sha" "$(basename "$archive_path")" > "$BACKUP_DIR/upstream.sha256"
+
+tar -tzf "$archive_path" > "$WORK_DIR/archive.list"
+if grep -Eq '(^/|(^|/)\.\.(/|$))' "$WORK_DIR/archive.list"; then
+	die "El archivo upstream contiene rutas inseguras"
+fi
+tar -xzf "$archive_path" -C "$WORK_DIR"
+source_dir="$WORK_DIR/csf"
+[[ -f "$source_dir/install.generic.sh" ]] || die "Formato upstream inesperado"
+[[ "$(tr -d '\r\n' < "$source_dir/version.txt")" == "$UPSTREAM_VERSION" ]] || die "Versión upstream inesperada"
+
+python3 "$KIT_DIR/lib/patch_upstream.py" "$source_dir"
+sh -n "$source_dir/install.generic.sh"
+
+log "Instalando fuente estable con activación y firewalld neutralizados"
+(
+	cd "$source_dir"
+	env -u SSH_CLIENT -u SSH_CONNECTION -u SSH_TTY sh ./install.generic.sh
+) > "$BACKUP_DIR/upstream-install.log" 2>&1 || {
+	tail -80 "$BACKUP_DIR/upstream-install.log" >&2 || true
+	die "Falló el instalador upstream; CSF/LFD permanecen enmascarados e inactivos"
+}
+
+systemctl stop csf lfd >/dev/null 2>&1 || true
+systemctl disable csf lfd >/dev/null 2>&1 || true
+
+log "Aplicando perfil Hestia multibackend"
+python3 "$KIT_DIR/lib/hestia_profile.py" configure --root / --config /etc/csf/csf.conf \
+	| tee "$BACKUP_DIR/profile-after.json"
+python3 "$KIT_DIR/lib/ensure_syslogusers.py" --root / --file /etc/csf/csf.syslogusers \
+	| tee "$BACKUP_DIR/syslogusers.txt"
+
+python3 "$KIT_DIR/lib/patch_hestia_ui.py" \
+	--root / \
+	--source "$source_dir" \
+	--templates "$KIT_DIR/templates"
+
+if ((PRESERVE_CSFPOST == 0)); then
+	install -m 0700 "$KIT_DIR/templates/csfpost.sh" /etc/csf/csfpost.sh
+fi
+
+python3 "$KIT_DIR/lib/disable_csf_cron.py" /etc/cron.d/csf_update /etc/cron.d/lfd-cron
+touch /etc/csf/csf.disable
+chmod 0600 /etc/csf/csf.disable
+
+log "Validando sintaxis e integración sin cargar reglas"
+perl -c /usr/sbin/csf
+perl -c /usr/sbin/lfd
+perl -c /usr/local/hestia/bin/csf.pl
+perl -c /usr/local/csf/bin/regex.custom.pm
+php -l /usr/local/hestia/web/list/csf/index.php
+php -l /usr/local/hestia/web/list/csf/frame.php
+php -l /usr/local/hestia/web/templates/pages/list_csf.php
+php -l /usr/local/hestia/web/templates/includes/panel.php
+bash -n /etc/csf/csfpost.sh
+/usr/local/csf/bin/csftest.pl | tee "$BACKUP_DIR/csftest.txt"
+grep -q 'RESULT: csf should function on this server' "$BACKUP_DIR/csftest.txt" \
+	|| die "csftest.pl no certificó el host"
+/usr/sbin/csf -p > "$BACKUP_DIR/csf-ports.txt"
+
+log "Reafirmando estado final desactivado"
+/usr/sbin/csf -x > "$BACKUP_DIR/disable-final.log" 2>&1 || true
+touch /etc/csf/csf.disable
+systemctl disable --now csf lfd >/dev/null 2>&1 || true
+systemctl unmask --runtime csf lfd >/dev/null 2>&1 || true
+systemctl disable --now csf lfd >/dev/null 2>&1 || true
+systemctl reset-failed csf lfd >/dev/null 2>&1 || true
+
+firewalld_after="$(systemctl show firewalld -p ActiveState -p UnitFileState 2>/dev/null || true)"
+[[ "$firewalld_after" == "$firewalld_before" ]] || die "El estado de firewalld cambió inesperadamente"
+
+[[ -e /etc/csf/csf.disable ]] || die "Falta /etc/csf/csf.disable"
+[[ "$(systemctl is-active csf 2>/dev/null || true)" != "active" ]] || die "csf quedó activo"
+[[ "$(systemctl is-active lfd 2>/dev/null || true)" != "active" ]] || die "lfd quedó activo"
+grep -Eq '^AUTO_UPDATES = "0"$' /etc/csf/csf.conf || die "AUTO_UPDATES no quedó desactivado"
+grep -Eq '^UI = "0"$' /etc/csf/csf.conf || die "La UI standalone no quedó desactivada"
+
+{
+	printf 'kit_version=%s\n' "$KIT_VERSION"
+	printf 'upstream_version=%s\n' "$UPSTREAM_VERSION"
+	printf 'upstream_sha256=%s\n' "$UPSTREAM_SHA256"
+	printf 'backup=%s\n' "$BACKUP_DIR"
+	printf 'csf_active=%s\n' "$(systemctl is-active csf 2>/dev/null || true)"
+	printf 'csf_enabled=%s\n' "$(systemctl is-enabled csf 2>/dev/null || true)"
+	printf 'lfd_active=%s\n' "$(systemctl is-active lfd 2>/dev/null || true)"
+	printf 'lfd_enabled=%s\n' "$(systemctl is-enabled lfd 2>/dev/null || true)"
+	printf 'disable_marker=%s\n' "$(test -e /etc/csf/csf.disable && echo present || echo absent)"
+} | tee "$BACKUP_DIR/FINAL-STATE.txt"
+
+log "Completado. CSF/LFD siguen desactivados. Respaldo: $BACKUP_DIR"
