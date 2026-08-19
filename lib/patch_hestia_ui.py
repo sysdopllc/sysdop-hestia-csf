@@ -197,6 +197,14 @@ def main() -> int:
         rooted(root, "/usr/local/hestia/web/list/csf/images"),
     )
 
+    # The /list/csf directory is created implicitly by install_file() using the
+    # caller's umask, which under the root install context yields mode 0700. The
+    # Hestia panel PHP/nginx run as a non-root account (e.g. "admin" on 1.8.x),
+    # so a 0700 directory makes the CSF tab return 403/404. Match the sibling
+    # /list/* directories (0755, world-traversable, world-readable 0644 files).
+    csf_dir = rooted(root, "/usr/local/hestia/web/list/csf")
+    os.chmod(csf_dir, 0o755)
+
     snippet = (templates / "panel-snippet.php").read_text(encoding="utf-8")
     patch_panel(panel, snippet)
 

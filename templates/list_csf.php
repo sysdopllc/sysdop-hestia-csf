@@ -1,6 +1,6 @@
 <main class="app-content">
 	<div class="l-separator"></div>
-	<div class="l-center units">
+	<div class="container">
 		<iframe scrolling="auto" name="myiframe" id="myiframe" src="/list/csf/frame.php" frameborder="0" width="100%" onload="resizeIframe(this);"></iframe>
 	</div>
 </main>

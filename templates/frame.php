@@ -11,7 +11,10 @@ $env .= "&HESTIASESSID=" . rawurlencode($_COOKIE["PHPSESSID"] ?? "");
 
 include $_SERVER["DOCUMENT_ROOT"] . "/inc/main.php";
 
-if (($_SESSION["role"] ?? "") !== "admin" || !empty($_SESSION["look"])) {
+// Portable across Hestia versions: newer builds expose the role in "role",
+// older ones (<=1.8.x) only in "userContext". Honour either, or the iframe
+// redirects to /list/user/ and renders the whole panel inside itself.
+if (($_SESSION["userContext"] ?? $_SESSION["role"] ?? "") !== "admin" || !empty($_SESSION["look"])) {
 	header("Location: /list/user/");
 	exit();
 }
