@@ -1,6 +1,7 @@
 # SYSDOP Hestia CSF
 
-Kit interno para instalar o reparar CSF en HestiaCP sin confundir la integración
+Kit open source de **SYSDOP LLC**, publicado bajo la **licencia MIT**,
+para instalar o reparar CSF en HestiaCP sin confundir la integración
 antigua de VestaCP con la identidad y las sesiones actuales de Hestia.
 
 La fuente está fijada al release estable Aetherinox 15.10 y a su SHA-256 oficial.
@@ -56,3 +57,17 @@ conectividad.
 Los fixtures simulan un Hestia con administrador y puertos renombrados, IPv6,
 correo, DNS, FTP pasivo y el menú sin CSF. La prueba ejecuta dos veces los
 parches y exige el mismo hash final.
+
+## Licencia y dependencias
+
+El código original del kit se distribuye bajo la [licencia MIT](LICENSE),
+con autoría de **SYSDOP LLC**. Puedes utilizarlo, modificarlo y distribuirlo
+conservando el aviso de licencia.
+
+CSF/Aetherinox se descarga por separado y conserva su licencia upstream;
+la licencia MIT del kit no lo relicencia. Consulta
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Los archivos de `tests/fixtures/` son datos sintéticos. Sus cuentas, registros
+y configuraciones no proceden de un servidor real. El fixture llamado
+`csf.png` contiene texto de prueba, no una imagen ni metadatos de una persona.
